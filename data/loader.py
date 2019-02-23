@@ -33,7 +33,10 @@ class DataLoader(object):
 
         # chunk into batches
         data = [data[i:i+batch_size] for i in range(0, len(data), batch_size)]
-        self.data = data
+        if not evaluation:
+            self.data = data[:-1]
+        else:
+            self.data = data
         print("{} batches created for {}".format(len(data), filename))
 
     def preprocess(self, data, vocab, opt):
@@ -133,3 +136,6 @@ def word_dropout(tokens, dropout):
     return [constant.UNK_ID if x != constant.UNK_ID and np.random.random() < dropout \
             else x for x in tokens]
 
+def get_length(filename):
+    json_data = json.load(open(filename))
+    return len(json_data)
