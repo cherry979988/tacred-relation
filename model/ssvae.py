@@ -14,7 +14,7 @@ class SSVAE(object):
 
         self.classifier = PositionAwareRNN(opt, emb_matrix)
         self.encoder = VAEEncoder(opt, emb_matrix)
-        self.decoder = VAEDecoder(opt)
+        self.decoder = VAEDecoder(opt, emb_matrix)
         self.criterion = nn.CrossEntropyLoss()
         self.criterion2 = nn.CrossEntropyLoss(reduction='none')
 
@@ -46,7 +46,7 @@ class SSVAE(object):
         self.encoder.train()
         self.decoder.train()
         btn, mu, logvar = self.encoder(inputs, labels)
-        rec = self.decoder(btn, inputs)
+        rec = self.decoder(btn, inputs, labels)
         m, n = inputs[0].shape
         loss2 = self.criterion(rec.view((m*n, -1)), inputs[0].view(m*n)) # rec loss
 
@@ -82,7 +82,7 @@ class SSVAE(object):
         m, n = inputs[0].shape
 
         btn, mu, logvar = self.encoder(inputs, sampled_preds)
-        rec = self.decoder(btn, inputs)
+        rec = self.decoder(btn, inputs, sampled_preds)
 
         temp = self.criterion2(rec.view((-1, self.opt['vocab_size'])), inputs[0].view(-1))
         temp = temp.view((m, n)).mean(dim=1)
@@ -121,11 +121,11 @@ class SSVAE(object):
         torch_utils.change_lr(self.optimizer, new_lr)
 
     def save(self, filename, epoch):
-        print('This function pretended to be saving :)')
+        #print('This function pretended to be saving :)')
         params = {
             'classifier': self.classifier.state_dict(),
-            #'encoder': self.encoder.state_dict(),
-            #'decoder': self.decoder.state_dict(),
+            'encoder': self.encoder.state_dict(),
+            'decoder': self.decoder.state_dict(),
             'config': self.opt,
             'epoch': epoch
         }
@@ -135,12 +135,24 @@ class SSVAE(object):
         except BaseException:
             print("[Warning: Saving failed... continuing anyway.]")
 
+    def load(self, filename):
+        try:
+            checkpoint = torch.load(filename)
+        except BaseException:
+            print("Cannot load model from {}".format(filename))
+            exit()
+        self.classifier.load_state_dict(checkpoint['classifier'])
+        #self.encoder.load_state_dict(checkpoint['encoder'])
+        #self.decoder.load_state_dict(checkpoint['decoder'])
+        self.opt = checkpoint['config']
+
     def _GaussianMarginalLogDensity(self, mu, logvar, normal_priori=False):
         if normal_priori:
             density = -0.5 * (np.log(2 * np.pi) + (torch.pow(mu, 2) + torch.exp(1e-8 + logvar)))
         else:
             density = -0.5 * (np.log(2 * np.pi) + 1 + logvar)
         return density.sum(-1)
+
 
     def _LossKL(self, mu, logvar):
         loss_kl = - self._GaussianMarginalLogDensity(mu, logvar, normal_priori=True) \
@@ -191,20 +203,37 @@ class VAEEncoder(nn.Module):
         return z, mu, logvar
 
 class VAEDecoder(nn.Module):
-    def __init__(self, opt):
+    def __init__(self, opt, emb_matrix=None):
         super(VAEDecoder, self).__init__()
 
-        opt['seq_len'] = 10
+        #opt['seq_len'] = 10
+        opt['label_hidden_dim'] = 30
 
         self.linear0 = nn.Linear(opt['bottleneck_dim'], opt['emb_dim'])
-        self.rnn = nn.GRU(1, opt['emb_dim'], opt['num_layers'], batch_first=True, dropout=opt['dropout'])
+        self.rnn = nn.LSTM(opt['emb_dim'] + opt['label_hidden_dim'], opt['emb_dim'], opt['num_layers'], batch_first=True, dropout=opt['dropout'])
         self.linear = nn.Linear(opt['emb_dim'], opt['vocab_size'])
+
+        self.emb_matrix = emb_matrix
+        self.emb = nn.Embedding(opt['vocab_size'], opt['emb_dim'], padding_idx=constant.PAD_ID)
+        self.emb_matrix = torch.from_numpy(self.emb_matrix)
+        self.emb.weight.data.copy_(self.emb_matrix)
+
+        self.LabelEmb = nn.Embedding(opt['num_class'], opt['label_hidden_dim'])
+
         # 照着NMT写一个？
 
-    def forward(self, z, x):
+    def forward(self, z, x, y):
         m, n = x[1].shape
-        input0 = x[1].reshape(m, n, 1).float()
+
+        shifted_words = x[0].roll(1, 1)
+        shifted_words[:, 0] = torch.zeros_like(shifted_words[:, 0])
+
+        input_embs = self.emb(shifted_words)
+        input_labels = self.LabelEmb(y.repeat(n, 1).t())
+        input0 = torch.cat((input_embs,input_labels), dim=2)
+
         input1 = F.relu(self.linear0(z))
         input1 = torch.stack((input1, input1), 0)
-        h1, _ = self.rnn(input0, input1)
+
+        h1, _ = self.rnn(input0, (input1, torch.zeros_like(input1)))
         return F.softmax(self.linear(h1))
