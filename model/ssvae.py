@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 from torch import nn
+from torch.nn import init
 import torch.nn.functional as F
 from torch.distributions.categorical import Categorical
 
@@ -16,6 +17,7 @@ class SSVAE(object):
         self.encoder = VAEEncoder(opt, emb_matrix)
         self.decoder = VAEDecoder(opt, emb_matrix)
         self.criterion = nn.CrossEntropyLoss()
+        self.criterion3 = nn.CrossEntropyLoss(reduction='sum')
         self.criterion2 = nn.CrossEntropyLoss(reduction='none')
 
         if opt['cuda']:
@@ -55,6 +57,7 @@ class SSVAE(object):
 
         # backward
         loss = loss1 + (loss2 + loss3) / self.opt['alpha']
+        # loss = (loss2 + loss3) / self.opt['alpha']
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.parameters, self.opt['max_grad_norm'])
         self.optimizer.step()
@@ -85,7 +88,7 @@ class SSVAE(object):
         rec = self.decoder(btn, inputs, sampled_preds)
 
         temp = self.criterion2(rec.view((-1, self.opt['vocab_size'])), inputs[0].view(-1))
-        temp = temp.view((m, n)).mean(dim=1)
+        temp = temp.view((m, n)).sum(dim=1)
 
         loss = torch.matmul(probs, temp)
         loss += torch.matmul(probs, self._LossKL(mu, logvar))
@@ -169,14 +172,12 @@ class VAEEncoder(nn.Module):
     def __init__(self, opt, emb_matrix=None):
         super(VAEEncoder, self).__init__()
 
-        opt['label_hidden_dim'] = 30
-        opt['inter_dim'] = 100
-        opt['bottleneck_dim'] = 20
+        opt['inter_dim'] = 200
 
         self.SentEncoder = PositionAwareRNN(opt, emb_matrix)
-        self.LabelEmb = nn.Embedding(opt['num_class'], opt['label_hidden_dim'])
+        self.LabelEmb = nn.Embedding(opt['num_class'], opt['label_dim'])
 
-        self.l10 = nn.Linear(opt['hidden_dim'] + opt['label_hidden_dim'], opt['inter_dim'])
+        self.l10 = nn.Linear(opt['hidden_dim'] + opt['label_dim'], opt['inter_dim'])
 
         self.l20 = nn.Linear(opt['inter_dim'], opt['bottleneck_dim'])
         self.l21 = nn.Linear(opt['inter_dim'], opt['bottleneck_dim'])
@@ -206,21 +207,27 @@ class VAEDecoder(nn.Module):
     def __init__(self, opt, emb_matrix=None):
         super(VAEDecoder, self).__init__()
 
-        #opt['seq_len'] = 10
-        opt['label_hidden_dim'] = 30
+        self.opt = opt
 
         self.linear0 = nn.Linear(opt['bottleneck_dim'], opt['emb_dim'])
-        self.rnn = nn.LSTM(opt['emb_dim'] + opt['label_hidden_dim'], opt['emb_dim'], opt['num_layers'], batch_first=True, dropout=opt['dropout'])
+        self.rnn = nn.LSTM(opt['emb_dim'] + opt['label_dim'], opt['emb_dim'], opt['num_layers'], batch_first=True, dropout=opt['dropout'])
         self.linear = nn.Linear(opt['emb_dim'], opt['vocab_size'])
 
         self.emb_matrix = emb_matrix
         self.emb = nn.Embedding(opt['vocab_size'], opt['emb_dim'], padding_idx=constant.PAD_ID)
-        self.emb_matrix = torch.from_numpy(self.emb_matrix)
-        self.emb.weight.data.copy_(self.emb_matrix)
 
-        self.LabelEmb = nn.Embedding(opt['num_class'], opt['label_hidden_dim'])
+        self.LabelEmb = nn.Embedding(opt['num_class'], opt['label_dim'])
 
         # 照着NMT写一个？
+
+    def init_weight(self):
+        if self.emb_matrix is None:
+            self.emb.weight.data[1:, :].uniform_(-1.0, 1.0)  # keep padding dimension to be 0
+        else:
+            self.emb_matrix = torch.from_numpy(self.emb_matrix)
+            self.emb.weight.data.copy_(self.emb_matrix)
+
+        self.LabelEmb.weight.data.uniform_(-1.0, 1.0)
 
     def forward(self, z, x, y):
         m, n = x[1].shape
@@ -237,3 +244,44 @@ class VAEDecoder(nn.Module):
 
         h1, _ = self.rnn(input0, (input1, torch.zeros_like(input1)))
         return F.softmax(self.linear(h1))
+
+    def init_hidden(self, bsz):
+        t1 = torch.rand((self.opt['num_layers'], bsz, self.opt['emb_dim'])).cuda()
+        t2 = torch.rand((self.opt['num_layers'], bsz, self.opt['emb_dim'])).cuda()
+        return (t1, t2)
+        #weight = next(self.parameters())
+        #return (weight.new_zeros(self.opt['num_layers'], bsz, self.opt['emb_dim']),
+        #        weight.new_zeros(self.opt['num_layers'], bsz, self.opt['emb_dim']))
+
+    def generate(self, length, z=None, y=None):
+        yy = torch.randint(self.opt['num_class'], (1, 1), dtype=torch.long).cuda()
+
+        if y is not None:
+            yy = y.view(-1, 1)
+
+        #input = torch.randint(self.opt['vocab_size'], (1, 1), dtype=torch.long).cuda()
+        input = torch.zeros_like(y).view(-1, 1)
+        #input.fill_(0)
+
+        if z is None:
+            hidden = self.init_hidden(1)
+        else:
+            #z = torch.Tensor(z).view(1, -1)
+            input1 = F.relu(self.linear0(z))
+            input1 = torch.stack((input1, input1), 0)
+            hidden = (input1, torch.zeros_like(input1))
+
+        result = []
+        with torch.no_grad():
+            for i in range(length):
+                input_emb = self.emb(input)
+                input_label = self.LabelEmb(yy)
+                input0 = torch.cat((input_emb, input_label), dim=2)
+
+                output, hidden = self.rnn(input0, hidden)
+                word_weights = output.squeeze().div(1.0).exp()
+                word_idx = torch.multinomial(word_weights, 1)
+                input = word_idx.view(-1, 1)
+                result.append(word_idx.view(-1).data.cpu().numpy())
+        return result
+

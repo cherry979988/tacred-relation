@@ -1,21 +1,12 @@
-"""
-Run evaluation with saved models.
-"""
-
-import os
-import random
 import argparse
-import pickle
-import numpy as np
 import torch
-import torch.nn as nn
-import torch.optim as optim
+import random
+import numpy as np
 
-from data.loader import DataLoader
-#from model.rnn import RelationModel
 from model.ssvae import SSVAE
 from utils import torch_utils, scorer, constant, helper
 from utils.vocab import Vocab
+from data.loader import DataLoader
 
 parser = argparse.ArgumentParser()
 parser.add_argument('model_dir', type=str, help='Directory of the model.')
@@ -36,6 +27,7 @@ if args.cpu:
 elif args.cuda:
     torch.cuda.manual_seed(args.seed)
 
+
 # load opt
 model_file = args.model_dir + '/' + args.model
 print("Loading model from {}".format(model_file))
@@ -50,29 +42,30 @@ vocab_file = args.model_dir + '/vocab.pkl'
 vocab = Vocab(vocab_file, load=True)
 assert opt['vocab_size'] == vocab.size, "Vocab size must match that in the saved model."
 
-# load data
-data_file = opt['data_dir'] + '/{}.json'.format(args.dataset)
-print("Loading data from {} with batch size {}...".format(data_file, opt['batch_size']))
-batch = DataLoader(data_file, opt['batch_size'], opt, vocab, evaluation=True)
+# load batch
+labeled_batch = DataLoader(opt['data_dir'] + '/train_labeled_%.2f.json' % opt['ratio'], opt['batch_size'], opt, vocab, evaluation=False)
+batch = labeled_batch[0]
 
-helper.print_config(opt)
+# generate sentence
+# idx_list = model.decoder.generate(100,y=21)
+# sent = vocab.unmap(idx_list)
+# print(' '.join(sent))
+
+# test batch
+if opt['cuda']:
+    inputs = [b.cuda() for b in batch[:7]]
+    labels = batch[7].cuda()
+else:
+    inputs = [b for b in batch[:7]]
+    labels = batch[7]
+
+btn, mu, logvar = model.encoder(inputs, labels)
+rec = model.decoder.generate(40, z=btn, y=labels)
+sent_list = np.array(rec).transpose()
 id2label = dict([(v,k) for k,v in constant.LABEL_TO_ID.items()])
-
-predictions = []
-all_probs = []
-for i, b in enumerate(batch):
-    preds, probs, _ = model.predict(b)
-    predictions += preds
-    all_probs += probs
-predictions = [id2label[p] for p in predictions]
-p, r, f1 = scorer.score(batch.gold(), predictions, verbose=True)
-
-# save probability scores
-if len(args.out) > 0:
-    helper.ensure_dir(os.path.dirname(args.out))
-    with open(args.out, 'wb') as outfile:
-        pickle.dump(all_probs, outfile)
-    print("Prediction scores saved to {}.".format(args.out))
-
-print("Evaluation ended.")
-
+labels = labels.cpu().numpy()
+inputs = inputs[0].cpu()
+for i, item in enumerate(sent_list):
+    print(id2label[labels[i]], '\t', ' '.join(vocab.unmap(item)))
+    print(' '.join(vocab.unmap(inputs[i])))
+    print(' ')

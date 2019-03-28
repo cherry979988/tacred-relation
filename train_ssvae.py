@@ -60,6 +60,8 @@ parser.add_argument('--cuda', type=bool, default=torch.cuda.is_available())
 parser.add_argument('--cpu', action='store_true', help='Ignore CUDA.')
 
 parser.add_argument('--ratio', type=float, default=0.3, help='ratio of labeled data.')
+parser.add_argument('--bottleneck_dim', type=int, default=200, help='VAE bottleneck embeddings.')
+parser.add_argument('--label_dim', type=int, default=100, help='Label embedding dimension.')
 
 args = parser.parse_args()
 
@@ -77,7 +79,8 @@ gpu_tracker = MemTracker(frame, path='./logs/')
 # make opt
 opt = vars(args)
 opt['num_class'] = len(constant.LABEL_TO_ID)
-opt['alpha'] = 0.1 * get_length(opt['data_dir'] + '/train_labeled_%.2f.json' % opt['ratio'])
+#opt['alpha'] = 0.01 * get_length(opt['data_dir'] + '/train_labeled_%.2f.json' % opt['ratio'])
+opt['alpha'] = 10.0
 
 # load vocab
 vocab_file = opt['vocab_dir'] + '/vocab.pkl'
